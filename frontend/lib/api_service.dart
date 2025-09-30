@@ -227,25 +227,6 @@ class ApiService {
   /// GET /api/inventory/items
   Future<http.Response> listInventoryItems() => get('/api/inventory/items');
 
-  /// PATCH /api/inventory/items/:id { stock: <int> }
-  // Future<http.Response> updateInventoryItem(
-  //   String id, {
-  //   int? stock,
-  //   double? unitPrice,
-  //   String? name,
-  //   String? uom,
-  //   int? minQty,
-  // }) {
-  //   final body = <String, dynamic>{
-  //     if (stock != null) 'stock': stock,
-  //     if (unitPrice != null) 'unitPrice': unitPrice,
-  //     if (name != null) 'name': name,
-  //     if (uom != null) 'uom': uom,
-  //     if (minQty != null) 'minQty': minQty,
-  //   };
-  //   return patch('/api/inventory/items/$id', body);
-  // }
-
   Future<http.Response> updateInventoryItem(
     String id, {
     int? stock,
