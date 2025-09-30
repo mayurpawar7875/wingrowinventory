@@ -1,6 +1,7 @@
 // lib/screens/manager_approvals_screen.dart
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../api_service.dart';
 
@@ -14,16 +15,108 @@ class ManagerApprovalsScreen extends StatefulWidget {
 
 class _ManagerApprovalsScreenState extends State<ManagerApprovalsScreen> {
   bool _loading = true;
-  List<dynamic> _claims = [];
   String? _error;
+  List<Map<String, dynamic>> _claims = [];
 
-  /// Page filter: SUBMITTED | APPROVED | REJECTED
+  /// SUBMITTED | APPROVED | REJECTED
   String _status = 'SUBMITTED';
 
-  @override
-  void initState() {
-    super.initState();
-    _load();
+  // -------- Local cache (for Approved/PAID history) --------
+  static const _kApprovedCache = 'mgr_approved_history_v1';
+
+  Future<SharedPreferences> _prefs() => SharedPreferences.getInstance();
+
+  Future<Map<String, Map<String, dynamic>>> _loadApprovedCache() async {
+    final p = await _prefs();
+    final raw = p.getString(_kApprovedCache);
+    if (raw == null || raw.isEmpty) return {};
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is Map) {
+        return decoded.map((k, v) {
+          if (v is Map) {
+            return MapEntry(
+                k.toString(), v.map((kk, vv) => MapEntry(kk.toString(), vv)));
+          }
+          return MapEntry(k.toString(), <String, dynamic>{});
+        });
+      }
+    } catch (_) {}
+    return {};
+  }
+
+  Future<void> _saveApprovedCache(
+      Map<String, Map<String, dynamic>> byId) async {
+    final p = await _prefs();
+    await p.setString(_kApprovedCache, jsonEncode(byId));
+  }
+
+  Future<void> _addOrUpdateCache(Map<String, dynamic> claim) async {
+    final id = (claim['_id'] ?? '').toString();
+    if (id.isEmpty) return;
+    final cache = await _loadApprovedCache();
+    cache[id] = claim;
+    await _saveApprovedCache(cache);
+  }
+
+  // ---------------- Networking helpers ----------------
+
+  Future<List<Map<String, dynamic>>> _fetchClaims(String path) async {
+    final r = await widget.api.get(path);
+    if (r.statusCode != 200) {
+      throw Exception('HTTP ${r.statusCode}: ${r.body}');
+    }
+    final m = jsonDecode(r.body);
+    final raw =
+        (m is Map && m['claims'] is List) ? (m['claims'] as List) : const [];
+    return raw
+        .whereType<Map>()
+        .map((e) => e.map((k, v) => MapEntry(k.toString(), v)))
+        .toList();
+  }
+
+  /// Load APPROVED history:
+  /// 1) Fetch server APPROVED (try with includePaid variants)
+  /// 2) Merge with local cache (keeps PAID visible even if server omits them)
+  Future<List<Map<String, dynamic>>> _loadApprovedHistory() async {
+    final merged = <String, Map<String, dynamic>>{};
+
+    // 1) Server APPROVED
+    Future<void> _try(String qp) async {
+      try {
+        final list = await _fetchClaims(qp);
+        for (final c in list) {
+          final id = (c['_id'] ?? '').toString();
+          if (id.isNotEmpty) merged[id] = c;
+        }
+      } catch (_) {}
+    }
+
+    await _try('/api/claims/approvals?status=APPROVED');
+    await _try('/api/claims/approvals?status=APPROVED&includePaid=true');
+    await _try('/api/claims/approvals?status=PAID'); // if server supports it
+
+    // 2) Merge local cache
+    final cache = await _loadApprovedCache();
+    for (final entry in cache.entries) {
+      merged[entry.key] = entry.value;
+    }
+
+    // Sort newest first by updatedAt/createdAt
+    final list = merged.values.toList()
+      ..sort((a, b) {
+        final au =
+            DateTime.tryParse('${a['updatedAt'] ?? a['createdAt'] ?? ''}')
+                    ?.millisecondsSinceEpoch ??
+                0;
+        final bu =
+            DateTime.tryParse('${b['updatedAt'] ?? b['createdAt'] ?? ''}')
+                    ?.millisecondsSinceEpoch ??
+                0;
+        return bu.compareTo(au);
+      });
+
+    return list;
   }
 
   Future<void> _load() async {
@@ -32,12 +125,10 @@ class _ManagerApprovalsScreenState extends State<ManagerApprovalsScreen> {
       _error = null;
     });
     try {
-      final r = await widget.api.approvalsByStatus(_status);
-      if (r.statusCode == 200) {
-        final data = jsonDecode(r.body) as Map<String, dynamic>;
-        _claims = (data['claims'] as List?) ?? [];
+      if (_status == 'APPROVED') {
+        _claims = await _loadApprovedHistory();
       } else {
-        _error = 'Failed: ${r.statusCode}';
+        _claims = await _fetchClaims('/api/claims/approvals?status=$_status');
       }
     } catch (e) {
       _error = e.toString();
@@ -45,6 +136,14 @@ class _ManagerApprovalsScreenState extends State<ManagerApprovalsScreen> {
       if (mounted) setState(() => _loading = false);
     }
   }
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  // ---------------- Actions ----------------
 
   Future<void> _approve(String id) async {
     final comment = await _askText('Approve comment (optional)');
@@ -76,14 +175,36 @@ class _ManagerApprovalsScreenState extends State<ManagerApprovalsScreen> {
     final ref = await _askText('Payment reference (optional)');
     final r = await widget.api.markPaid(id, paymentRef: ref);
     if (!mounted) return;
+
     if (r.statusCode == 200) {
+      // Update card immediately
+      final idx = _claims.indexWhere((c) => (c['_id'] ?? '') == id);
+      if (idx != -1) {
+        setState(() {
+          _claims[idx]['status'] = 'PAID';
+          _claims[idx]['updatedAt'] = DateTime.now().toIso8601String();
+        });
+        // Persist in cache so it stays after refresh
+        _addOrUpdateCache(_claims[idx]);
+      } else {
+        // If not in current list, still ensure it remains in approved history
+        _addOrUpdateCache({
+          '_id': id,
+          'status': 'PAID',
+          'updatedAt': DateTime.now().toIso8601String()
+        });
+      }
+
       ScaffoldMessenger.of(context)
           .showSnackBar(const SnackBar(content: Text('Marked as PAID')));
-      _load();
+
+      // No _load(); we keep it on screen. User can refresh and it will remain via cache.
     } else {
       _showErr(r.body);
     }
   }
+
+  // ---------------- UI helpers ----------------
 
   Future<String?> _askText(String title) async {
     final ctrl = TextEditingController();
@@ -115,8 +236,8 @@ class _ManagerApprovalsScreenState extends State<ManagerApprovalsScreen> {
     }
   }
 
-  Future<bool?> _confirmLogout(BuildContext context) {
-    return showDialog<bool>(
+  Future<void> _logout() async {
+    final yes = await showDialog<bool>(
       context: context,
       builder: (_) => AlertDialog(
         title: const Text('Logout'),
@@ -131,10 +252,6 @@ class _ManagerApprovalsScreenState extends State<ManagerApprovalsScreen> {
         ],
       ),
     );
-  }
-
-  Future<void> _logout() async {
-    final yes = await _confirmLogout(context);
     if (yes != true) return;
     await widget.api.logout();
     if (!mounted) return;
@@ -151,7 +268,7 @@ class _ManagerApprovalsScreenState extends State<ManagerApprovalsScreen> {
   String _emptyText() {
     switch (_status) {
       case 'APPROVED':
-        return 'No approved claims';
+        return 'No approved/paid claims';
       case 'REJECTED':
         return 'No rejected claims';
       default:
@@ -204,8 +321,6 @@ class _ManagerApprovalsScreenState extends State<ManagerApprovalsScreen> {
     );
   }
 
-  // ---------- UI bits ----------
-
   Widget _statusChip(String value, String label, IconData icon) {
     final selected = _status == value;
     return ChoiceChip(
@@ -238,7 +353,6 @@ class _ManagerApprovalsScreenState extends State<ManagerApprovalsScreen> {
   }
 
   Widget _filtersBar() {
-    // Left: status chips, Right: inventory buttons; wraps nicely on small widths
     return Padding(
       padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
       child: LayoutBuilder(builder: (context, c) {
@@ -292,8 +406,9 @@ class _ManagerApprovalsScreenState extends State<ManagerApprovalsScreen> {
 
   @override
   Widget build(BuildContext context) {
-    // Buttons shown on each card
     Widget actionsRowFor(Map<String, dynamic> c) {
+      final st = (c['status'] ?? '').toString();
+
       if (_status == 'SUBMITTED') {
         return Row(
           children: [
@@ -317,9 +432,7 @@ class _ManagerApprovalsScreenState extends State<ManagerApprovalsScreen> {
       }
 
       if (_status == 'APPROVED') {
-        final claimStatus = (c['status'] ?? '').toString();
-        if (claimStatus == 'PAID') {
-          // Already paid → show a chip
+        if (st == 'PAID') {
           return Align(
             alignment: Alignment.centerLeft,
             child: Chip(
@@ -331,15 +444,14 @@ class _ManagerApprovalsScreenState extends State<ManagerApprovalsScreen> {
               ),
             ),
           );
-        } else {
-          // Approved but not yet paid → show action button
-          return ElevatedButton.icon(
-            icon: const Icon(Icons.payments),
-            label: const Text('Mark Paid'),
-            onPressed: () => _markPaid(c['_id']),
-          );
         }
+        return ElevatedButton.icon(
+          icon: const Icon(Icons.payments),
+          label: const Text('Mark Paid'),
+          onPressed: () => _markPaid(c['_id']),
+        );
       }
+
       // REJECTED
       return const SizedBox.shrink();
     }
@@ -354,7 +466,7 @@ class _ManagerApprovalsScreenState extends State<ManagerApprovalsScreen> {
       ),
       body: Column(
         children: [
-          _filtersBar(), // <-- new responsive header
+          _filtersBar(),
           Expanded(
             child: _loading
                 ? const Center(child: CircularProgressIndicator())
@@ -370,8 +482,7 @@ class _ManagerApprovalsScreenState extends State<ManagerApprovalsScreen> {
                               separatorBuilder: (_, __) =>
                                   const SizedBox(height: 8),
                               itemBuilder: (_, i) {
-                                final c =
-                                    (_claims[i] as Map).cast<String, dynamic>();
+                                final c = _claims[i];
                                 final items = (c['items'] as List?) ?? [];
                                 final total = _computeTotal(c);
 
@@ -389,8 +500,8 @@ class _ManagerApprovalsScreenState extends State<ManagerApprovalsScreen> {
                                               child: Text(
                                                 'Claim #${c['_id'].toString().substring(0, 6)} • by ${c['userId']}',
                                                 style: const TextStyle(
-                                                  fontWeight: FontWeight.w600,
-                                                ),
+                                                    fontWeight:
+                                                        FontWeight.w600),
                                               ),
                                             ),
                                             TextButton.icon(
@@ -403,8 +514,7 @@ class _ManagerApprovalsScreenState extends State<ManagerApprovalsScreen> {
                                         ),
                                         const SizedBox(height: 4),
                                         Text(
-                                          'Items: ${items.length}    Total: ₹$total',
-                                        ),
+                                            'Items: ${items.length}    Total: ₹$total'),
                                         const SizedBox(height: 10),
                                         actionsRowFor(c),
                                       ],

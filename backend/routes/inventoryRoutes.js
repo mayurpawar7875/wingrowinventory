@@ -25,5 +25,6 @@ router.post("/requests", auth, inv.createRequest);
 router.get("/requests", auth, inv.listRequests);
 router.post("/requests/:id/approve", auth, managerOnly, inv.approveRequest);
 router.post("/requests/:id/reject",  auth, managerOnly, inv.rejectRequest);
+router.post("/requests/:id/payments", auth, inv.addPaymentProof);
 
 module.exports = router;

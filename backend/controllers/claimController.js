@@ -69,12 +69,41 @@ async function submit(req, res) {
 }
 
 // common
-async function list(req, res) {
-  const mine = req.query.mine === "true";
-  const filter = mine ? { userId: req.user.userId } : {};
-  const claims = await Claim.find(filter).sort({ createdAt: -1 });
-  return res.json({ ok: true, claims });
+// async function list(req, res) {
+//   const mine = req.query.mine === "true";
+//   const filter = mine ? { userId: req.user.userId } : {};
+//   const claims = await Claim.find(filter).sort({ createdAt: -1 });
+//   return res.json({ ok: true, claims });
+// }
+
+// controllers/claimsController.js (or wherever you list approvals)
+async function listApprovals(req, res) {
+  try {
+    const { status } = req.query;
+
+    const filter = {};
+    if (status) {
+      const allowed = ['SUBMITTED', 'APPROVED', 'REJECTED', 'PAID'];
+      if (!allowed.includes(status)) {
+        return res.status(400).json({ message: 'Invalid status' });
+      }
+
+      if (status === 'APPROVED') {
+        // <-- include PAID in the "approved" bucket
+        filter.status = { $in: ['APPROVED', 'PAID'] };
+      } else {
+        filter.status = status;
+      }
+    }
+
+    // managers see all; non-managers filtered server-side as you already do
+    const claims = await Claim.find(filter).sort({ createdAt: -1 }).lean();
+    res.json({ ok: true, claims });
+  } catch (e) {
+    res.status(500).json({ message: e.message });
+  }
 }
+
 
 async function getOne(req, res) {
   const c = await Claim.findById(req.params.id);
@@ -125,16 +154,24 @@ async function reject(req, res) {
 }
 
 async function markPaid(req, res) {
-  if (req.user.role !== "manager") return res.status(403).json({ message: "Forbidden" });
-  const c = await Claim.findById(req.params.id);
-  if (!c) return res.status(404).json({ message: "Not found" });
-  if (c.status !== "APPROVED") return res.status(400).json({ message: "Only APPROVED can be marked PAID" });
-  c.status = "PAID";
-  c.paidAt = new Date();
-  c.paymentRef = (req.body?.paymentRef || "").toString();
-  await c.save();
-  return res.json({ ok: true });
+  try {
+    const { id } = req.params;
+    const { paymentRef = '' } = req.body;
+    const claim = await Claim.findById(id);
+    if (!claim) return res.status(404).json({ message: 'Not found' });
+    if (claim.status !== 'APPROVED' && claim.status !== 'PAID') {
+      return res.status(400).json({ message: 'Only approved/paid can be marked paid' });
+    }
+    claim.status = 'PAID';
+    if (paymentRef) claim.paymentRef = paymentRef;
+    claim.paidAt = new Date();
+    await claim.save();
+    res.json({ ok: true, claim });
+  } catch (e) {
+    res.status(500).json({ message: e.message });
+  }
 }
+
 
 // GET /api/claims/approvals?status=SUBMITTED|APPROVED|REJECTED
 async function approvalsByStatus(req, res) {
@@ -147,12 +184,67 @@ async function approvalsByStatus(req, res) {
   res.json({ ok: true, claims });
 }
 
+// --- LIST: employee + general (for /api/claims) ---
+async function listClaims(req, res) {
+  try {
+    const { mine, status } = req.query;
+
+    const allowed = ['SUBMITTED', 'APPROVED', 'REJECTED', 'PAID'];
+    if (status && !allowed.includes(status)) {
+      return res.status(400).json({ message: 'Invalid status' });
+    }
+
+    const filter = {};
+    // Employees see only their own; managers can pass mine=true to filter
+    if (mine === 'true' || req.user.role !== 'manager') {
+      filter.userId = req.user.userId;
+    }
+
+    if (status) {
+      // Keep approved tab stable even after payment
+      filter.status = (status === 'APPROVED')
+        ? { $in: ['APPROVED', 'PAID'] }
+        : status;
+    }
+
+    const claims = await Claim.find(filter).sort({ createdAt: -1 }).lean();
+    return res.json({ ok: true, claims });
+  } catch (e) {
+    return res.status(500).json({ message: e.message });
+  }
+}
+
+// --- LIST: manager approvals (for /api/claims/approvals) ---
+async function listApprovals(req, res) {
+  try {
+    const { status } = req.query;
+    const allowed = ['SUBMITTED', 'APPROVED', 'REJECTED', 'PAID'];
+    if (status && !allowed.includes(status)) {
+      return res.status(400).json({ message: 'Invalid status' });
+    }
+
+    const filter = {};
+    if (status) {
+      // Keep Approved tab stable even after payment
+      filter.status = (status === 'APPROVED')
+        ? { $in: ['APPROVED', 'PAID'] }
+        : status;
+    }
+
+    const claims = await Claim.find(filter).sort({ createdAt: -1 }).lean();
+    res.json({ ok: true, claims });
+  } catch (e) {
+    res.status(500).json({ message: e.message });
+  }
+}
+
 module.exports = {
   createOrGetDraft,
   addItem,
   deleteItem,
   submit,
-  list,
+  listApprovals,
+  listClaims,
   getOne,
   pendingApprovals,
   approvalsByStatus,

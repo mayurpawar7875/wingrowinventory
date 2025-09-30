@@ -1,6 +1,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+ <!-- ✅ Add Internet permission here -->
+    <uses-permission android:name="android.permission.INTERNET" />
     <application
-        android:label="frontend"
+        android:label="Wingrow Inventory"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity
@@ -39,6 +41,7 @@
     <queries>
         <intent>
             <action android:name="android.intent.action.PROCESS_TEXT"/>
+            
             <data android:mimeType="text/plain"/>
         </intent>
     </queries>

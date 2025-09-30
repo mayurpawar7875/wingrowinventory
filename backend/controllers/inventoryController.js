@@ -36,57 +36,34 @@ async function seedItems(_req, res) {
   }
 }
 
-/**
- * PATCH /api/inventory/items/:id
- * body: { stock: <non-negative integer> }
- * (manager)
- */
-// async function updateItemStock(req, res) {
-//   try {
-//     const { id } = req.params;
-//     let { stock } = req.body;
 
-//     if (typeof stock === "string") stock = stock.trim();
-//     const n = Number(stock);
-//     if (!Number.isInteger(n) || n < 0) {
-//       return res.status(400).json({ ok: false, message: "stock must be a non-negative integer" });
-//     }
-
-//     const item = await InventoryItem.findById(id);
-//     if (!item) return res.status(404).json({ ok: false, message: "Item not found" });
-
-//     item.stock = n;
-//     await item.save();
-//     res.json({ ok: true, item });
-//   } catch (e) {
-//     res.status(500).json({ ok: false, message: e.message });
-//   }
-// }
-
-async function updateItemStock(req, res) {
+// controllers/inventoryController.js (or wherever your update route is)
+async function updateItemStock(req, res){
   try {
     const { id } = req.params;
-    let { stock } = req.body;
+    const body = req.body;
 
-    // ✅ Ensure it is a number
-    const n = parseInt(stock, 10);
-    if (isNaN(n) || n < 0) {
-      return res
-        .status(400)
-        .json({ ok: false, message: "stock must be a non-negative integer" });
+    const update = {};
+    if ('stock' in body) update.stock = Math.max(0, parseInt(body.stock, 10) || 0);
+    if ('unitPrice' in body) update.unitPrice = Number(body.unitPrice) || 0;
+
+    // (optional) accept legacy keys
+    if ('qty' in body && !('stock' in body)) {
+      update.stock = Math.max(0, parseInt(body.qty, 10) || 0);
+    }
+    if ('price' in body && !('unitPrice' in body)) {
+      update.unitPrice = Number(body.price) || 0;
     }
 
-    const item = await InventoryItem.findById(id);
-    if (!item)
-      return res.status(404).json({ ok: false, message: "Item not found" });
+    const item = await InventoryItem.findByIdAndUpdate(id, update, { new: true });
+    if (!item) return res.status(404).json({ message: 'Item not found' });
 
-    item.stock = n;
-    await item.save();
     res.json({ ok: true, item });
   } catch (e) {
-    res.status(500).json({ ok: false, message: e.message });
+    res.status(400).json({ message: e.message });
   }
-}
+};
+
 
 // ---------- ISSUE REQUESTS ----------
 
@@ -142,45 +119,94 @@ async function listRequests(req, res) {
   }
 }
 
-// POST /api/inventory/requests/:id/approve  (manager)
+
+
+// controllers/inventoryController.js  (approveRequest)
+// async function approveRequest(req, res) {
+//   try {
+//     const { id } = req.params;
+//     let { issueQty, note = "", amountDue } = req.body;
+
+//     const r = await IssueRequest.findById(id);
+//     if (!r || r.status !== "PENDING") {
+//       return res.status(404).json({ ok: false, message: "Request not found or not pending" });
+//     }
+
+//     const item = await InventoryItem.findById(r.itemId);
+//     if (!item) return res.status(404).json({ ok: false, message: "Item not found" });
+
+//     issueQty = Number(issueQty);
+//     if (!Number.isInteger(issueQty) || issueQty <= 0) issueQty = r.qty;
+
+//     if (item.stock < issueQty) {
+//       return res.status(400).json({ ok: false, message: "Insufficient stock" });
+//     }
+
+//     item.stock -= issueQty;
+//     await item.save();
+
+//     // set approval fields
+//     r.status       = "APPROVED";
+//     r.issuedQty    = issueQty;
+//     r.decidedBy    = req.user.userId;
+//     r.decidedAt    = new Date();
+//     r.decisionNote = note || r.decisionNote;
+
+//     // NEW: expected total price
+//     if (amountDue !== undefined && amountDue !== null && !Number.isNaN(Number(amountDue))) {
+//       r.amountDue = Number(amountDue);
+//     }
+
+//     // compute settlement
+//     const rec = r.amountReceived || 0;
+//     if (rec <= 0) r.settlementStatus = "DUE";
+//     else if (r.amountDue && rec >= r.amountDue) r.settlementStatus = "PAID";
+//     else r.settlementStatus = "PARTIAL";
+
+//     await r.save();
+//     res.json({ ok: true, request: r, item });
+//   } catch (e) {
+//     res.status(500).json({ ok: false, message: e.message });
+//   }
+// }
+
 async function approveRequest(req, res) {
   try {
-    const { id } = req.params;
-    let { issueQty, note = "" } = req.body;
+    const { id } = req.params;  // request id
+    const { issuedQty } = req.body;
 
-    const r = await IssueRequest.findById(id);
-    if (!r || r.status !== "PENDING") {
-      return res.status(404).json({ ok: false, message: "Request not found or not pending" });
-    }
+    const reqDoc = await InventoryRequest.findById(id).populate('item');
+    if (!reqDoc) return res.status(404).json({ message: 'Request not found' });
+    if (!reqDoc.item) return res.status(400).json({ message: 'Linked item missing' });
 
-    const item = await InventoryItem.findById(r.itemId);
-    if (!item) return res.status(404).json({ ok: false, message: "Item not found" });
+    // Freeze price at approval time (source of truth = stock list)
+    const unitPrice = Number(reqDoc.item.unitPrice) || 0;
+    const qty = Number(issuedQty ?? reqDoc.issuedQty) || 0;
 
-    issueQty = Number(issueQty);
-    if (!Number.isInteger(issueQty) || issueQty <= 0) issueQty = r.qty;
+    reqDoc.status = 'APPROVED';
+    reqDoc.issuedQty = qty;
+    reqDoc.unitPrice = unitPrice;
+    reqDoc.totalCost = unitPrice * qty;
 
-    if (item.stock < issueQty) {
-      return res.status(400).json({ ok: false, message: "Insufficient stock" });
-    }
+    await reqDoc.save();
 
-    // deduct and save
-    item.stock -= issueQty;
-    await item.save();
-
-    // mark approved
-    r.status       = "APPROVED";
-    r.issuedQty    = issueQty;
-    r.decidedBy    = req.user.userId;
-    r.decidedAt    = new Date();
-    r.decisionNote = note || r.decisionNote;
-    await r.save();
-
-    res.json({ ok: true, request: r, item });
+    // return shaped data used by UI
+    const payload = {
+      id: reqDoc.id,
+      itemName: reqDoc.item.name,
+      issuedQty: reqDoc.issuedQty,
+      status: reqDoc.status,
+      unitPrice: reqDoc.unitPrice,
+      totalCost: reqDoc.totalCost,
+      amountPaid: reqDoc.amountPaid,
+      amountPending: Math.max(0, reqDoc.totalCost - reqDoc.amountPaid),
+      requestedDate: reqDoc.createdAt,
+    };
+    res.json(payload);
   } catch (e) {
-    res.status(500).json({ ok: false, message: e.message });
+    res.status(400).json({ message: e.message });
   }
-}
-
+};
 // POST /api/inventory/requests/:id/reject  (manager)
 async function rejectRequest(req, res) {
   try {
@@ -204,6 +230,64 @@ async function rejectRequest(req, res) {
   }
 }
 
+// POST /api/inventory/requests/:id/payments
+// async function addPaymentProof(req, res) {
+//   const { id } = req.params;
+//   const { amount, proofUrl, note = "" } = req.body;
+
+//   const r = await IssueRequest.findById(id);
+//   if (!r) return res.status(404).json({ ok: false, message: "Request not found" });
+//   if (r.status !== "APPROVED") return res.status(400).json({ ok: false, message: "Only approved requests can accept payments" });
+
+//   const amt = Number(amount);
+//   if (!Number.isFinite(amt) || amt < 0) return res.status(400).json({ ok: false, message: "amount must be a non-negative number" });
+//   if (!proofUrl) return res.status(400).json({ ok: false, message: "proofUrl is required" });
+
+//   r.payments.push({
+//     amount: amt,
+//     proofUrl,
+//     note,
+//     uploadedBy: req.user.userId,
+//   });
+
+//   r.amountReceived += amt;
+
+//   // update settlement flag
+//   if (r.amountDue > 0) {
+//     if (r.amountReceived >= r.amountDue) r.settlementStatus = 'PAID';
+//     else if (r.amountReceived > 0) r.settlementStatus = 'PARTIAL';
+//     else r.settlementStatus = 'DUE';
+//   } else {
+//     // no due set → consider anything received as PARTIAL unless zero
+//     r.settlementStatus = r.amountReceived > 0 ? 'PARTIAL' : 'DUE';
+//   }
+
+//   await r.save();
+//   res.json({ ok: true, request: r });
+// }
+async function addPaymentProof(req, res){
+  try {
+    const { id } = req.params;        // request id
+    const { amount } = req.body;      // number
+    const reqDoc = await InventoryRequest.findById(id);
+    if (!reqDoc) return res.status(404).json({ message: 'Request not found' });
+
+    reqDoc.amountPaid = (reqDoc.amountPaid || 0) + (Number(amount) || 0);
+    await reqDoc.save();
+
+    res.json({
+      id: reqDoc.id,
+      amountPaid: reqDoc.amountPaid,
+      amountPending: Math.max(0, (reqDoc.totalCost || 0) - (reqDoc.amountPaid || 0)),
+      totalCost: reqDoc.totalCost || 0,
+      unitPrice: reqDoc.unitPrice || 0,
+    });
+  } catch (e) {
+    res.status(400).json({ message: e.message });
+  }
+};
+
+
 module.exports = {
   listItems,
   seedItems,
@@ -211,5 +295,6 @@ module.exports = {
   createRequest,
   listRequests,
   approveRequest,
+  addPaymentProof,
   rejectRequest,
 };

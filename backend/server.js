@@ -13,10 +13,21 @@ const app = express();
 // --- basic middleware
 app.use(express.json({ limit: "5mb" }));
 app.use(cookieParser());
+const allowedOrigins = [
+  "http://localhost:5173",          // dev
+  "http://localhost:3000",          // dev
+  "https://your-app.onrender.com",  // production
+];
+
 app.use(cors({
-  origin: true,        // allow all origins for dev
+  origin: (origin, cb) => {
+    if (!origin || allowedOrigins.includes(origin)) return cb(null, true);
+    cb(new Error("Not allowed by CORS"));
+  },
   credentials: true
 }));
+app.get("/health", (req, res) => res.status(200).send("OK"));
+
 
 const authRoutes = require("./routes/authRoutes");
 app.use("/api/auth", authRoutes);

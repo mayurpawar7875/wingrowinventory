@@ -1,6 +1,7 @@
 // lib/screens/manager_item_requests_screen.dart
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../api_service.dart';
 
 class ManagerItemRequestsScreen extends StatefulWidget {
@@ -23,7 +24,7 @@ class _ManagerItemRequestsScreenState extends State<ManagerItemRequestsScreen> {
   @override
   void initState() {
     super.initState();
-    // pick optional initial status from route arguments, then load
+    // optional initial status from route args
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final args = ModalRoute.of(context)?.settings.arguments;
       if (args is Map && args['status'] is String) {
@@ -88,7 +89,6 @@ class _ManagerItemRequestsScreenState extends State<ManagerItemRequestsScreen> {
   }
 
   Future<void> _approve(Map<String, dynamic> req) async {
-    // Optional: override qty to issue; leave blank to use requested qty
     final requested = (req['qty'] is num) ? (req['qty'] as num).toInt() : 1;
     final qtyText = await _askText(
       title: 'Issue quantity (blank = $requested)',
@@ -109,7 +109,7 @@ class _ManagerItemRequestsScreenState extends State<ManagerItemRequestsScreen> {
       }
       issueQty = n;
     } else {
-      issueQty = null; // backend will use requested qty
+      issueQty = null; // backend uses requested qty
     }
 
     final note = await _askText(
@@ -152,6 +152,47 @@ class _ManagerItemRequestsScreenState extends State<ManagerItemRequestsScreen> {
     } else {
       ScaffoldMessenger.of(context)
           .showSnackBar(SnackBar(content: Text('Error: ${r.body}')));
+    }
+  }
+
+  // ---- payments UI helpers (read-only for manager) ----
+
+  Widget _settlementChip(String settle) {
+    switch (settle) {
+      case 'PAID':
+        return Chip(
+          label: const Text('Paid'),
+          backgroundColor: Colors.green.withOpacity(.15),
+          labelStyle:
+              const TextStyle(color: Colors.green, fontWeight: FontWeight.w600),
+        );
+      case 'PARTIAL':
+        return Chip(
+          label: const Text('Partial'),
+          backgroundColor: Colors.orange.withOpacity(.15),
+          labelStyle: const TextStyle(
+              color: Colors.orange, fontWeight: FontWeight.w600),
+        );
+      default:
+        return Chip(
+          label: const Text('Due'),
+          backgroundColor: Colors.red.withOpacity(.12),
+          labelStyle:
+              const TextStyle(color: Colors.red, fontWeight: FontWeight.w600),
+        );
+    }
+  }
+
+  Future<void> _openUrl(String? url) async {
+    if (url == null || url.isEmpty) return;
+    final uri = Uri.parse(url);
+    if (await canLaunchUrl(uri)) {
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
+    } else {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Unable to open link')),
+      );
     }
   }
 
@@ -240,7 +281,8 @@ class _ManagerItemRequestsScreenState extends State<ManagerItemRequestsScreen> {
                         itemCount: _requests.length,
                         separatorBuilder: (_, __) => const SizedBox(height: 8),
                         itemBuilder: (_, i) {
-                          final r = _requests[i] as Map<String, dynamic>;
+                          final r =
+                              (_requests[i] as Map).cast<String, dynamic>();
 
                           final name = (r['itemName'] ?? 'Item').toString();
                           final qty = (r['qty'] is num)
@@ -255,23 +297,122 @@ class _ManagerItemRequestsScreenState extends State<ManagerItemRequestsScreen> {
                           final noteMgr = (r['decisionNote'] ?? '').toString();
                           final created = (r['createdAt'] ?? '').toString();
 
+                          // NEW: money tracking surfaced to manager
+                          final amountDue = (r['amountDue'] is num)
+                              ? (r['amountDue'] as num).toDouble()
+                              : 0.0;
+                          final amountReceived = (r['amountReceived'] is num)
+                              ? (r['amountReceived'] as num).toDouble()
+                              : 0.0;
+                          final settlement = (r['settlementStatus'] ??
+                                  (amountReceived <= 0 ? 'DUE' : 'PARTIAL'))
+                              .toString();
+
+                          final payments = (r['payments'] is List)
+                              ? (r['payments'] as List)
+                                  .whereType<Map>()
+                                  .map<Map<String, dynamic>>((e) => e
+                                      .map((k, v) => MapEntry(k.toString(), v)))
+                                  .toList()
+                              : const <Map<String, dynamic>>[];
+
                           return Card(
-                            child: ListTile(
-                              title: Text('$name • Qty: $qty'),
-                              subtitle: Column(
+                            child: Padding(
+                              padding:
+                                  const EdgeInsets.fromLTRB(12, 10, 12, 12),
+                              child: Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
-                                  Text('Requested by: $userId'),
-                                  if (issued > 0) Text('Issued: $issued'),
-                                  if (noteReq.isNotEmpty)
-                                    Text('Note: $noteReq'),
-                                  if (noteMgr.isNotEmpty)
-                                    Text('Manager note: $noteMgr'),
-                                  if (created.isNotEmpty)
-                                    Text('Date: ${created.substring(0, 10)}'),
+                                  ListTile(
+                                    contentPadding: EdgeInsets.zero,
+                                    title: Text('$name • Qty: $qty',
+                                        style: const TextStyle(
+                                            fontWeight: FontWeight.w600)),
+                                    subtitle: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        Text('Requested by: $userId'),
+                                        if (issued > 0) Text('Issued: $issued'),
+                                        if (noteReq.isNotEmpty)
+                                          Text('Note: $noteReq'),
+                                        if (noteMgr.isNotEmpty)
+                                          Text('Manager note: $noteMgr'),
+                                        if (created.isNotEmpty &&
+                                            created.length >= 10)
+                                          Text(
+                                              'Date: ${created.substring(0, 10)}'),
+                                      ],
+                                    ),
+                                    trailing: _trailingFor(r),
+                                  ),
+
+                                  // Payments section (only meaningful for APPROVED)
+                                  if ((_status == 'APPROVED') ||
+                                      ((r['status'] ?? '') == 'APPROVED')) ...[
+                                    const SizedBox(height: 6),
+                                    Row(
+                                      children: [
+                                        _settlementChip(settlement),
+                                        const SizedBox(width: 8),
+                                        Text(
+                                          amountDue > 0
+                                              ? 'Received ₹${amountReceived.toStringAsFixed(2)} / ₹${amountDue.toStringAsFixed(2)}'
+                                              : 'Received ₹${amountReceived.toStringAsFixed(2)}',
+                                        ),
+                                      ],
+                                    ),
+                                    if (payments.isNotEmpty) ...[
+                                      const SizedBox(height: 8),
+                                      const Text('Payments:',
+                                          style: TextStyle(
+                                              fontWeight: FontWeight.w600)),
+                                      const SizedBox(height: 6),
+                                      ...payments.map((p) {
+                                        final amt = (p['amount'] is num)
+                                            ? (p['amount'] as num).toDouble()
+                                            : 0.0;
+                                        final when =
+                                            (p['uploadedAt'] ?? '').toString();
+                                        final short = when.length >= 10
+                                            ? when.substring(0, 10)
+                                            : when;
+                                        final note =
+                                            (p['note'] ?? '').toString();
+                                        final url =
+                                            (p['proofUrl'] ?? p['url'] ?? '')
+                                                .toString();
+
+                                        return Padding(
+                                          padding:
+                                              const EdgeInsets.only(bottom: 6),
+                                          child: Row(
+                                            children: [
+                                              Expanded(
+                                                child: Text(
+                                                  '• ₹${amt.toStringAsFixed(2)}  •  $short'
+                                                  '${note.isNotEmpty ? '  •  $note' : ''}',
+                                                ),
+                                              ),
+                                              if (url.isNotEmpty)
+                                                TextButton.icon(
+                                                  icon: const Icon(
+                                                    Icons.open_in_new,
+                                                    size: 18,
+                                                  ),
+                                                  label:
+                                                      const Text('View proof'),
+                                                  onPressed: () =>
+                                                      _openUrl(url),
+                                                ),
+                                            ],
+                                          ),
+                                        );
+                                      }),
+                                    ],
+                                  ],
                                 ],
                               ),
-                              trailing: _trailingFor(r),
                             ),
                           );
                         },
