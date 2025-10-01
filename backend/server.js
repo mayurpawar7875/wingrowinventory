@@ -16,7 +16,7 @@ app.use(cookieParser());
 const allowedOrigins = [
   "http://localhost:5173",          // dev
   "http://localhost:3000",          // dev
-  "https://your-app.onrender.com",  // production
+  "https://wingrowinventory.onrender.com",  // production
 ];
 
 app.use(cors({
