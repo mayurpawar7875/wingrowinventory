@@ -3,25 +3,26 @@ const express = require("express");
 const mongoose = require("mongoose");
 const cookieParser = require("cookie-parser");
 const cors = require("cors");
+const path = require("path");
 
-// Load .env only in development, NEVER in production on Render
+// Load .env only in development (Render sets env vars itself)
 if (process.env.NODE_ENV !== "production") {
   require("dotenv").config();
 }
 
 const app = express();
 
-// --- basic middleware
+// ---------- Middleware ----------
 app.use(express.json({ limit: "5mb" }));
 app.use(cookieParser());
 
-// For quick testing, allow all origins; tighten later.
+// For quick testing: allow any origin. Tighten this later.
 app.use(cors({ origin: true, credentials: true }));
 
-// Health
+// ---------- Health & Debug ----------
 app.get("/health", (req, res) => res.status(200).send("OK"));
 
-// 🔎 Debug the DB name & query (TEMPORARY; remove later)
+// TEMP debug to verify DB name and URI shape (remove later)
 app.get("/debug/db", (req, res) => {
   const uri = process.env.MONGO_URI || "";
   const db = uri.split("/")[3]?.split("?")[0] || "";
@@ -32,21 +33,42 @@ app.get("/debug/db", (req, res) => {
   });
 });
 
-// Routes
-const authRoutes = require("./routes/authRoutes");
-app.use("/api/auth", authRoutes);
+// ---------- Routes ----------
+app.use("/api/auth", require("./routes/authRoutes"));
 app.use("/api/claims", require("./routes/claimRoutes"));
-
-const path = require("path");
-app.use("/uploads", express.static(path.join(__dirname, "uploads")));
-
 app.use("/api/uploads", require("./routes/uploadRoutes"));
 app.use("/api/inventory", require("./routes/inventoryRoutes"));
+app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
 // Simple root
 app.get("/", (req, res) => res.send("Wingrow API running"));
 
-// --- connect to Mongo, then start server
+// ---------- TEMP: seed superadmin (REMOVE AFTER USE) ----------
+const bcrypt = require("bcryptjs");
+app.post("/dev/seed-superadmin", async (req, res) => {
+  try {
+    if (req.query.key !== process.env.SEED_KEY) {
+      return res.status(403).send("nope");
+    }
+    // Adjust the model path/name if needed
+    const Users = require("./models/User");
+
+    const hash = bcrypt.hashSync("Wingrow@1234", 10);
+    await Users.updateOne(
+      { userId: "superadmin" },
+      { $set: { password: hash, role: "manager" } },
+      { upsert: true }
+    );
+
+    res.send("superadmin seeded");
+  } catch (e) {
+    console.error("Seed error:", e);
+    res.status(500).send("seed failed");
+  }
+});
+// --------------------------------------------------------------
+
+// ---------- Mongo connect & start ----------
 const PORT = process.env.PORT || 4000;
 const URI = process.env.MONGO_URI;
 
@@ -55,11 +77,8 @@ if (!URI) {
   process.exit(1);
 }
 
-// Log a safe summary so we can confirm the URI shape in Render logs
-console.log(
-  "Using Mongo URI:",
-  (URI || "").replace(/\/\/.*?:.*?@/, "//***:***@")
-);
+// Safe log (won't print credentials or query)
+console.log("Using Mongo URI:", (URI || "").replace(/\/\/.*?:.*?@/, "//***:***@"));
 
 mongoose
   .connect(URI, { autoIndex: true })
